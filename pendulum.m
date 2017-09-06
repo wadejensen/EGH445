@@ -1,17 +1,47 @@
-% note that these constants are samples only, 
-% and should be MEASURED off the actual robot
-m = 0.1;   % mass of the robot
-M = 0.01;  % mass of the wheel
-J = 1e-6;  % inertia of the wheel
+clc
+close all
+clear all
+
+%% Define model params
+
+m = ((80.170 * 2) + (4.230 * 2) + 147.900 + (3.300 * 10)) * 10^-3;   % mass of the robot
+M = 2*0.006;  % mass of the wheel
 L = 0.2;    % distance from the wheel to the center of mass
-r = 50e-3;  % wheel radius
+r = 0.03;  % wheel radius
+J = 1e-6; %M*r^2;  % inertia of the wheel % M*r.^2
 
-step_time = 1e-1;
+params.M = M;
+params.m = m;
+params.L = L;
+params.r = r;
+params.J = J;
+params.g = 9.81;
 
-params = segway();
+% simulation step time
+step_time = 1e-2;
 
+% Goals
+% Settling time for both pendulum angle and displacement of 2 seconds
+
+% change this to show stability when not starting at 0
+initial_angle = 0.05; % radians
+
+% Define state space equations
+% x = A*x + B*u
+% y = C*x + D*u
+
+% x_dot = [ \theta_dot, \theta_dot2, y_dot, y_dot2  ]
+% x = [ \theta, \theta_dot, y, y_dot]
+% y = [ \theta, y ]
+
+% where \theta is angle of pendulum with vertical
+%       y is displacement of the centre of mass from the origin
+
+
+% Linearize the sine relationship of the pendulum angle with the vertical
 [A, B] = linearize(params);
 
+% define C to give the desired output variables
 C = [ 1 0 0 0 ; 0 0 1 0 ];
 D = [ 0; 0];
 
@@ -19,13 +49,90 @@ sys_ss = ss(A,B,C,D);
 
 poles = eig(sys_ss)
 
-K = lqr( sys_ss , diag ( [ 10 1 100 1 ] ) , 1)
+figure(1)
+pzmap(sys_ss);
 
-sys_closed_ss = ss(A-B*K, B, [ 1 0 0 0 ; 0 0 1 0 ] , 0)
-sys_closed_ss.OutputName = {'\theta', 'y'}
+%% Apply an LQR controller
+
+% LQR (Linear Quandratic Regulator) applies weightings to the input, state and output variables
+% The initial rule of thumb is to place a 10X weighting on the parameters
+% we care about.
+% Note: The settling time is controlled by the R matrix
+% The R matrix controls the effect of the input on the system
+% The Q matrix controls the effect of the state on the system
+
+Q = C'*C; % natural Q matrix
+% Override the Q weightings
+
+% Displacement weighting
+Q(1,1) = 100;
+% Angular position weighting
+Q(3,3) = 100;
+% Use a factor of 10 as rule of thumb
+Q(2,2) = 1;
+Q(4,4) = 1;
+
+% Set a base weighting for input
+R = 1;
+
+K = lqr( sys_ss, Q , R)
+
+% Change A matrix to be closed loop
+A_closed = A-B*K
+
+sys_closed_ss = ss(A_closed, B, C , D);
+
+sys_closed_ss.OutputName = {'\theta', 'y'};
 
 closed_loop_poles = eig(sys_closed_ss)
 
-x0 = [ 0.1, 0, 0, 0 ]';
+figure(3)
+pzmap(sys_ss);
+
+x0 = [ initial_angle, 0, 0, 0 ]';
 t = [ 0 : 0.005 : 20 ]'; % simulation time vector
+
+figure(4)
 lsim( sys_closed_ss, 0*t , t, x0);
+
+
+%% Compensate for steady state error using a pre-compensation scale factor
+
+% Create a new C matrix which only changes displacement (y)
+C_comp = [0,0,1,0];
+% scaling factor
+N_bar=-inv(C_comp*((A-B*K)\B));
+
+precompensated_closed = ss(A_closed,B*N_bar,C, D );
+precompensated_closed.OutputName = {'\theta', 'y'};
+
+% check the poles
+comp_closed_poles = eig(precompensated_closed)
+
+% View performance
+x0 = [ initial_angle, 0, 0, 0 ]';
+t = [ 0 : 0.005 : 20 ]'; % simulation time vector
+
+figure(5)
+lsim(precompensated_closed, 0*t, t, x0);
+
+%% Get transient response info
+[Y, T, ~] = step(precompensated_closed);
+
+time = T;
+angle = Y(:,1);
+displacement = Y(:,2);
+
+angleTransient = stepinfo(angle,time)
+displacementTransient = stepinfo(displacement, time)
+
+% The %OS values from stepinfo are nonsensical because setpoint is 0
+[num, den] = ss2tf(A_closed,B*N_bar,C, D)
+G_angle = tf(num(1,:), den);
+
+% [num, den] = ss2tf(precompensated_closed,)
+% G_displacement = tf(num, den);
+
+
+
+
